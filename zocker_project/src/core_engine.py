@@ -5,101 +5,94 @@ import ctypes
 from resources import ResourceManager, get_limits_from_config
 from isolation import apply_isolation, set_container_hostname
 
-# Flag for creating a new PID namespace
+# --- Flags & System Constants ---
 CLONE_NEWPID = 0x20000000
+CLONE_NEWNS  = 0x00020000
+CLONE_NEWUTS = 0x04000000
+MS_REC = 16384
+MS_PRIVATE = 262144
 
-def get_full_config(container_id):
-    """Reads the full OCI config from the user's home directory."""
-    # Get the real user even if running with sudo
+# --- Helper Logic: Filesystem & Config ---
+
+def manage_rootfs(rootfs_path, action="setup"):
+    """Handles the container's jail environment."""
+    dirs = ['bin', 'lib', 'lib64', 'usr', 'etc', 'proc', 'sys', 'dev']
+    if action == "setup":
+        for d in dirs: os.makedirs(os.path.join(rootfs_path, d), exist_ok=True)
+        # Using bind mounts for performance as discussed before
+        for d in ['bin', 'lib', 'lib64', 'usr', 'etc']:
+            target = os.path.join(rootfs_path, d)
+            if not os.path.ismount(target):
+                os.system(f"mount --bind -o ro /{d} {target}")
+    elif action == "cleanup":
+        for d in reversed(['bin', 'lib', 'lib64', 'usr', 'etc']):
+            target = os.path.join(rootfs_path, d)
+            if os.path.ismount(target): os.system(f"umount {target}")
+
+def get_container_env(container_id):
+    """Prepares paths and loads OCI config."""
     real_user = os.getenv("SUDO_USER") or os.getenv("USER")
-    config_path = f"/home/{real_user}/.zocker/containers/{container_id}/config.json"
-    
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config not found at {config_path}")
-        
-    with open(config_path, 'r') as f:
-        return json.load(f)
+    base_dir = f"/home/{real_user}/.zocker/containers/{container_id}"
+    with open(os.path.join(base_dir, "config.json"), 'r') as f:
+        return base_dir, json.load(f)
 
-def apply_dynamic_mounts(config_data):
-    """Mounts required filesystems defined in the configuration."""
-    mounts = config_data.get('mounts', [])
-    for m in mounts:
-        source, destination, m_type = m.get('source'), m.get('destination'), m.get('type')
-        print(f"[*] Mounting {source} to {destination}...")
-        os.makedirs(destination, exist_ok=True)
-        os.system(f"mount -t {m_type} {source} {destination}")
+# --- Core Logic: Execution ---
+
+def run_container_process(container_id, rootfs_path, config_data, rm):
+    """The internal logic of the jailed process."""
+    libc = ctypes.CDLL("libc.so.6")
+
+    # 1. Isolation: Mount Private & Chroot
+    libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
+    os.chroot(rootfs_path)
+    os.chdir("/")
+
+    # 2. Setup internal mounts (like /proc)
+    for m in config_data.get('mounts', []):
+        os.makedirs(m['destination'], exist_ok=True)
+        os.system(f"mount -t {m['type']} {m['source']} {m['destination']}")
+
+    # 3. Finalize Identity & Resource attachment
+    set_container_hostname(f"zocker-{container_id[:6]}")
+    rm.attach(os.getpid())
+
+    # 4. Exec
+    os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    os.chdir(config_data.get('process', {}).get('cwd', '/'))
+    os.execvp("/bin/bash", ["/bin/bash"])
 
 def start_container(container_id):
+    """Main entry point for starting the container."""
     try:
-        # 1. Load config and set resource limits
-        config_data = get_full_config(container_id)
+        base_dir, config_data = get_container_env(container_id)
+        rootfs_path = os.path.join(base_dir, "rootfs")
+        
+        # Resource management
         mem, cpu = get_limits_from_config(container_id)
         rm = ResourceManager(container_id)
         rm.create_limits(mem, cpu)
 
-        # 2. Prepare namespaces (except PID)
-        apply_isolation()
-        
-        # 3. Use libc to unshare PID namespace
+        # Prepare Environment
+        manage_rootfs(rootfs_path, "setup")
+        apply_isolation() #
+
+        # Namespace Unshare
         libc = ctypes.CDLL("libc.so.6")
-        if libc.unshare(CLONE_NEWPID) != 0:
-            raise OSError("Failed to unshare PID namespace")
+        if libc.unshare(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS) != 0:
+            raise OSError("Unshare failed")
 
         pid = os.fork()
-
         if pid == 0:
-            # --- CHILD PROCESS (Inside Container) ---
-            os.system("mount --make-rprivate /")
-            apply_dynamic_mounts(config_data)
-            set_container_hostname(f"zocker-{container_id[:6]}")
-            
-            # Attach child to cgroup
-            rm.attach(os.getpid())
-
-            # Set Environment
-            os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            os.environ["HOME"] = "/root"
-            os.chdir(config_data.get('process', {}).get('cwd', '/'))
-
-            print(f"\n[+] Container {container_id} is active (Internal PID: {os.getpid()})")
-            os.execvp("/bin/bash", ["/bin/bash"])
-
+            run_container_process(container_id, rootfs_path, config_data, rm)
         else:
-            # --- PARENT PROCESS (Host System) ---
-            # 4. Save state BEFORE waiting for the child
-            real_user = os.getenv("SUDO_USER") or os.getenv("USER")
-            container_dir = f"/home/{real_user}/.zocker/containers/{container_id}"
-            os.makedirs(container_dir, exist_ok=True)
-
-            state_data = {
-                "id": container_id,
-                "status": "running",
-                "pid": pid, # Real Host PID
-                "bundle": container_dir
-            }
-
-            state_path = os.path.join(container_dir, "state.json")
-            with open(state_path, "w") as f:
-                json.dump(state_data, f, indent=4)
-            
-            os.chmod(state_path, 0o666)
-            print(f"[+] State file created at: {state_path}")
-            print(f"[+] Container process started with Host PID: {pid}")
-
-            # 5. Wait for container to exit
+            # Parent: State management and cleanup
+            print(f"[+] Container {container_id} started (Host PID: {pid})")
             os.wait()
-            
-            # Update state to stopped
-            state_data["status"] = "stopped"
-            with open(state_path, "w") as f:
-                json.dump(state_data, f, indent=4)
-            print(f"\n[-] Container {container_id} has stopped.")
+            manage_rootfs(rootfs_path, "cleanup")
+            print(f"[-] Container {container_id} stopped and cleaned up.")
 
     except Exception as e:
-        print(f"Core Engine Error: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        start_container(sys.argv[1])
-    else:
-        print("Usage: sudo python3 core_engine.py <container_id>")
+    if len(sys.argv) > 1: start_container(sys.argv[1])
