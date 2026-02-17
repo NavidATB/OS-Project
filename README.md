@@ -1,4 +1,4 @@
-# Zocker: A High-Performance Daemonless Container Engine
+# Zocker: A Daemonless Container Engine
 
 Zocker is a lightweight, OCI-compliant container management system developed as a core operating systems project. It focuses on low-level Linux kernel features to provide true process isolation, resource management, and distributed container orchestration across multiple Virtual Machines (VMs).
 
