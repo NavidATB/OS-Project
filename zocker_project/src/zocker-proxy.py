@@ -163,6 +163,38 @@ def main():
                 res = proxy.send_command(cid, {"cmd": "exec", "uuid": u_id, "shell_cmd": command})
                 print(f"--- Output from {u_id} ---\n{res}")
 
+            elif cmd == "connect":
+                if len(parts) < 4:
+                    print("Usage: connect <VM1_CID> <UUID1> [<VM2_CID> <UUID2>]")
+                    continue
+                
+                if len(parts) == 4:
+                    cid = int(parts[1])
+                    u_id1, u_id2 = parts[2], parts[3]
+                    res = proxy.send_command(cid, {"cmd": "connect", "uuid1": u_id1, "uuid2": u_id2})
+                    print(f"Result: {res}")
+                
+                elif len(parts) == 5:
+                    cid1, u_id1 = int(parts[1]), parts[2]
+                    cid2, u_id2 = int(parts[3]), parts[4]
+                    
+                    if cid1 not in proxy.nodes or cid2 not in proxy.nodes:
+                        print("Error: One of the nodes is not registered.")
+                        continue
+                        
+                    ip1 = proxy.nodes[cid1]['real_ip']
+                    ip2 = proxy.nodes[cid2]['real_ip']
+                    
+                    print(f"[*] Establishing VXLAN between {ip1} (CID {cid1}) and {ip2} (CID {cid2})...")
+                    
+                    proxy.send_command(cid1, {
+                        "cmd": "connect_remote", "uuid": u_id1, "remote_ip": ip2, "container_ip": "10.0.0.10"
+                    })
+                    res = proxy.send_command(cid2, {
+                        "cmd": "connect_remote", "uuid": u_id2, "remote_ip": ip1, "container_ip": "10.0.0.11"
+                    })
+                    print(f"Result: {res}")
+
             elif cmd == "exit": 
                 break
         except Exception as e:

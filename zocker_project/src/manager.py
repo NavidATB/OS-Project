@@ -31,7 +31,8 @@ def remove_container(container_id, force=False):
             return False, "Error: Container is running. Use -f to force remove."
 
     print(f"[*] Stopping service zocker-{container_id}...")
-    os.system(f"sudo systemctl stop zocker-{container_id} > /dev/null 2>&1")
+    os.system(f"sudo systemctl stop --no-block zocker-{container_id}")
+    os.system(f"sudo systemctl disable zocker-{container_id} > /dev/null 2>&1")
     
     service_link = os.path.join(SYSTEMD_PATH, f"zocker-{container_id}.service")
     if os.path.exists(service_link):
@@ -113,12 +114,16 @@ After=network.target
 [Service]
 Type=simple
 Environment=HOME={home_dir}
+Environment=PYTHONPATH={current_dir}
 ExecStart=/usr/bin/python3 {exec_path} {container_id}
 ExecStopPost={stop_post_cmd}
+User=root
+Group=root
+Delegate=yes
+Slice=system.slice
+ProtectHome=false
 Restart=on-failure
 RestartSec=3
-User=root
-WorkingDirectory={current_dir}
 
 [Install]
 WantedBy=multi-user.target
@@ -143,3 +148,78 @@ def get_all_container_states():
                 try: containers.append(json.load(f))
                 except: pass
     return containers
+
+
+def connect_containers(id1, id2):
+    try:
+        def get_pid(c_id):
+            state_p = os.path.join(BASE_PATH, c_id, "state.json")
+            if not os.path.exists(state_p): return None
+            with open(state_p, 'r') as f:
+                return json.load(f).get('pid')
+
+        pid1, pid2 = get_pid(id1), get_pid(id2)
+        if not pid1 or not pid2:
+            return False, "Error: One or both containers are not running."
+
+        os.system("sudo ip link add zocker-br0 type bridge 2>/dev/null")
+        os.system("sudo ip link set zocker-br0 up")
+        os.system("sudo ip addr add 10.0.0.1/24 dev zocker-br0 2>/dev/null")
+
+        os.system(f"sudo ip link add veth-{id1[:4]} type veth peer name eth0-{id1[:4]}")
+        os.system(f"sudo ip link set veth-{id1[:4]} master zocker-br0")
+        os.system(f"sudo ip link set veth-{id1[:4]} up")
+        os.system(f"sudo ip link set eth0-{id1[:4]} netns {pid1}")
+        
+        os.system(f"sudo nsenter -t {pid1} -n ip link set dev eth0-{id1[:4]} name eth0")
+        os.system(f"sudo nsenter -t {pid1} -n ip addr add 10.0.0.2/24 dev eth0")
+        os.system(f"sudo nsenter -t {pid1} -n ip link set eth0 up")
+
+        os.system(f"sudo ip link add veth-{id2[:4]} type veth peer name eth0-{id2[:4]}")
+        os.system(f"sudo ip link set veth-{id2[:4]} master zocker-br0")
+        os.system(f"sudo ip link set veth-{id2[:4]} up")
+        os.system(f"sudo ip link set eth0-{id2[:4]} netns {pid2}")
+        
+        os.system(f"sudo nsenter -t {pid2} -n ip link set dev eth0-{id2[:4]} name eth0")
+        os.system(f"sudo nsenter -t {pid2} -n ip addr add 10.0.0.3/24 dev eth0")
+        os.system(f"sudo nsenter -t {pid2} -n ip link set eth0 up")
+
+        return True, "Success: Containers connected on 10.0.0.2 <-> 10.0.0.3"
+    except Exception as e:
+        return False, f"Network Error: {str(e)}"
+    
+def get_main_interface():
+    cmd = "ip route get 8.8.8.8 | grep -oP 'dev \K\S+'"
+    return os.popen(cmd).read().strip()
+
+
+def setup_vxlan_and_connect(remote_vm_ip, container_id, container_ip, vni=42):
+    try:
+        state_p = os.path.join(BASE_PATH, container_id, "state.json")
+        with open(state_p, 'r') as f:
+            pid = json.load(f).get('pid')
+        
+        if not pid: return False, "Container not running"
+
+        os.system("sudo ip link add zocker-br0 type bridge 2>/dev/null")
+        os.system("sudo ip link set zocker-br0 up")
+        main_iface = get_main_interface()
+        os.system(f"sudo ip link add vxlan0 type vxlan id {vni} remote {remote_vm_ip} dstport 4789 dev {main_iface} 2>/dev/null")
+        os.system("sudo ip link set vxlan0 master zocker-br0 2>/dev/null")
+        os.system("sudo ip link set vxlan0 up")
+
+        veth_host = f"veth-{container_id[:4]}"
+        veth_guest = f"eth1-{container_id[:4]}"
+        
+        os.system(f"sudo ip link add {veth_host} type veth peer name {veth_guest}")
+        os.system(f"sudo ip link set {veth_host} master zocker-br0")
+        os.system(f"sudo ip link set {veth_host} up")
+        os.system(f"sudo ip link set {veth_guest} netns {pid}")
+        
+        os.system(f"sudo nsenter -t {pid} -n ip link set dev {veth_guest} name eth1")
+        os.system(f"sudo nsenter -t {pid} -n ip addr add {container_ip}/24 dev eth1")
+        os.system(f"sudo nsenter -t {pid} -n ip link set eth1 up")
+        
+        return True, f"Success: Tunnel to {remote_vm_ip} created and container connected."
+    except Exception as e:
+        return False, str(e)

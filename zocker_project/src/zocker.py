@@ -109,7 +109,7 @@ def main():
         manager.exec_in_container(args.id, args.cmd)
 
     elif args.command == "stop":
-        os.system(f"sudo systemctl stop zocker-{args.id}")
+        os.system(f"sudo systemctl stop --no-block zocker-{args.id}")
         print(f"[+] Container {args.id} stopped.")
 
     elif args.command == "restart":

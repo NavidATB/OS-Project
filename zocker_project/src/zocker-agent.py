@@ -10,6 +10,16 @@ HOST_CID = 2
 REG_PORT = 8888
 CMD_PORT = 9999
 
+def get_ip_address():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
 def get_stats():
     total_m = psutil.virtual_memory().total // (1024 * 1024)
     total_c = psutil.cpu_count()
@@ -22,7 +32,8 @@ def get_stats():
         "total_mem": total_m, 
         "alloc_mem": alloc_m,
         "total_cpu": total_c,
-        "alloc_cpu": 0 
+        "alloc_cpu": 0,
+        "real_ip": get_ip_address()
     }
 
 def listen():
@@ -93,6 +104,21 @@ def listen():
                 print(f"[*] Executing command inside {u_id[:12]}: {shell_cmd}")
                 result = manager.exec_in_container_V2(u_id, shell_cmd)
                 conn.sendall(str(result).encode('utf-8'))
+
+            elif cmd == "connect":
+                u_id1 = req.get('uuid1')
+                u_id2 = req.get('uuid2')
+                print(f"[*] Connecting {u_id1[:8]} and {u_id2[:8]}")
+                success, msg = manager.connect_containers(u_id1, u_id2)
+                conn.sendall(msg.encode('utf-8'))
+
+            elif cmd == "connect_remote":
+                u_id = req.get('uuid')
+                remote_ip = req.get('remote_ip')
+                c_ip = req.get('container_ip')
+                print(f"[*] Setting up VXLAN tunnel to {remote_ip} for {u_id[:8]}")
+                success, msg = manager.setup_vxlan_and_connect(remote_ip, u_id, c_ip)
+                conn.sendall(msg.encode('utf-8'))
 
         except Exception as e:
             print(f"[!] Error during command execution: {str(e)}")

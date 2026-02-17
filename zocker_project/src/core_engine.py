@@ -72,39 +72,43 @@ def run_container_process(container_id, rootfs_path, config_data, rm):
     try:
         libc = ctypes.CDLL("libc.so.6")
         libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None)
+
+        process_cfg = config_data.get("process", {})
+        args = process_cfg.get("args", ["/bin/sh"])
+        cwd = process_cfg.get("cwd", "/")
+        env_list = process_cfg.get("env", [])
+        env_dict = os.environ.copy()
+        for item in env_list:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                env_dict[k] = v
+
         if "mounts" in config_data:
             for mnt in config_data["mounts"]:
                 src = mnt["source"]
                 dst = os.path.join(rootfs_path, mnt["destination"].lstrip("/"))
                 os.makedirs(dst, exist_ok=True)
                 os.system(f"mount --bind {src} {dst}")
-                print(f"[*] Mounted {src} to {mnt['destination']}")
 
         os.system(f"mount --bind /dev {os.path.join(rootfs_path, 'dev')}")
         os.chroot(rootfs_path)
-        os.chdir("/")
+        os.chdir(cwd)
         
         os.makedirs("/proc", exist_ok=True)
-        os.system("mount -t proc proc /proc")
-        os.makedirs("/sys", exist_ok=True)
-        os.system("mount -t sysfs sys /sys")
         
-        if "env" in config_data:
-            for env_item in config_data["env"]:
-                if "=" in env_item:
-                    k, v = env_item.split("=", 1)
-                    os.environ[k] = v
+        try:
+            os.system("mount -t proc proc /proc -o nosuid,nodev,noexec")
+        except Exception as e:
+            print(f"Mount proc failed: {e}")
 
+        os.makedirs("/sys", exist_ok=True)
+        os.system("mount -t sysfs sys /sys -o nosuid,nodev,noexec")
         set_container_hostname(f"zocker-{container_id[:6]}")
         rm.attach(os.getpid())
         
-        os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        os.environ["TERM"] = "xterm"
-        
-        print(f"[*] Container {container_id} is starting as PID 1...")
+        print(f"[*] Container starting OCI process: {' '.join(args)}")
 
-
-        os.execlp("sh", "sh", "-c", "tail -f /dev/null")
+        os.execvpe(args[0], args, env_dict)
         
     except Exception as e:
         with open("/tmp/zocker_error.log", "a") as f:
@@ -125,10 +129,11 @@ def start_container(container_id):
         rm.create_limits(mem, cpu)
         
         manage_rootfs(rootfs_path, "setup")
-        apply_isolation()
         
         libc = ctypes.CDLL("libc.so.6")
-        if libc.unshare(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS) != 0:
+        all_flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | 0x08000000 | 0x40000000 
+        
+        if libc.unshare(all_flags) != 0:
             raise OSError("Unshare failed")
 
         pid = os.fork()

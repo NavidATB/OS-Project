@@ -4,42 +4,29 @@ import json
 class ResourceManager:
     def __init__(self, container_id):
         self.container_id = container_id
-        self.path = os.path.join("/sys/fs/cgroup", f"zocker_{container_id}")
+        self.path = os.path.join("/sys/fs/cgroup/system.slice", f"zocker-{container_id}.scope")
 
     def create_limits(self, mem_limit, cpu_shares):
-        try:
-            with open("/sys/fs/cgroup/cgroup.subtree_control", "w") as f:
-                f.write("+memory +cpu +pids")
-        except:
-            pass
-
         os.makedirs(self.path, exist_ok=True)
         
         try:
             with open(os.path.join(self.path, "memory.max"), "w") as f:
-                if int(mem_limit) < 1000000:
-                    f.write("max")
-                else:
-                    f.write(str(mem_limit))
-        except:
-            pass
+                f.write(str(mem_limit) if int(mem_limit) > 0 else "max")
+        except Exception as e:
+            print(f"Cgroup Mem Error: {e}")
 
         try:
             with open(os.path.join(self.path, "cpu.max"), "w") as f:
                 f.write(f"{cpu_shares} 100000")
-        except:
-            pass
+        except Exception as e:
+            print(f"Cgroup CPU Error: {e}")
 
     def attach(self, pid):
         try:
             with open(os.path.join(self.path, "cgroup.procs"), "w") as f:
                 f.write(str(pid))
-        except:
-            pass
-
-    def remove(self):
-        if os.path.exists(self.path):
-            os.system(f"sudo rmdir {self.path}")
+        except Exception as e:
+            print(f"Cgroup Attach Error: {e}")
 
 def get_limits_from_config(container_id):
     home_dir = os.path.expanduser("~")
