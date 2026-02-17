@@ -9,3 +9,5 @@ zocker_project/src/__pycache__/resources.cpython-312.pyc
 zocker_project/src/__pycache__/manager.cpython-312.pyc
 zocker_project/src/__pycache__/isolation.cpython-312.pyc
 zocker_project/src/__pycache__/core_engine.cpython-312.pyc
+**/__pycache__/
+*.pyc
